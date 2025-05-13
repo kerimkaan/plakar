@@ -26,6 +26,7 @@ type AppContext struct {
 
 	Stdout io.Writer `msgpack:"-"`
 	Stderr io.Writer `msgpack:"-"`
+	Stdin  io.Reader `msgpack:"-"`
 
 	NumCPU      int
 	Username    string
@@ -57,6 +58,7 @@ func NewAppContext() *AppContext {
 		events:  events.New(),
 		Stdout:  os.Stdout,
 		Stderr:  os.Stderr,
+		Stdin:   os.Stdin,
 		Context: ctx,
 		Cancel:  cancel,
 	}
