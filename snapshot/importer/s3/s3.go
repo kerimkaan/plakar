@@ -21,7 +21,6 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -109,16 +108,60 @@ func NewS3Importer(ctx *appcontext.AppContext, name string, config map[string]st
 	}, nil
 }
 
-func (p *S3Importer) scanRecursive(prefix string, result chan *importer.ScanResult) {
-	for object := range p.minioClient.ListObjects(p.ctx, p.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: false}) {
-		objectPath := "/" + object.Key
-		if !strings.HasPrefix(objectPath, p.scanDir) && !strings.HasPrefix(p.scanDir, objectPath) {
-			continue
+func (p *S3Importer) Scan() (<-chan *importer.ScanResult, error) {
+	result := make(chan *importer.ScanResult)
+	go func() {
+		defer close(result)
+
+		// Create scandir entries.
+		parent := p.scanDir
+		for {
+			fi := objects.NewFileInfo(
+				filepath.Base(parent),
+				0,
+				0700|os.ModeDir,
+				time.Now(),
+				0,
+				0,
+				0,
+				0,
+				0,
+			)
+			result <- importer.NewScanRecord(parent, "", fi, nil)
+
+			if parent == "/" {
+				break
+			}
+			parent = filepath.Dir(parent)
 		}
 
-		if strings.HasSuffix(object.Key, "/") {
-			p.scanRecursive(object.Key, result)
-		} else {
+		prefix := strings.TrimPrefix(p.scanDir, "/")
+
+		for object := range p.minioClient.ListObjects(p.ctx, p.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
+			// Create a record for each of the parent directories of the object.
+			// Two objects in a same directory will generate the same records for this directory, but the backup layer ignores duplicates.
+			parent := filepath.Dir(object.Key)
+			for {
+				// p.scanDir directories have already been created above.
+				if parent == "." || parent == prefix {
+					break
+				}
+
+				fi := objects.NewFileInfo(
+					parent,
+					0,
+					0700|os.ModeDir,
+					time.Now(),
+					0,
+					0,
+					0,
+					0,
+					0,
+				)
+				result <- importer.NewScanRecord("/"+prefix, "", fi, nil)
+				parent = filepath.Dir(parent)
+			}
+
 			fi := objects.NewFileInfo(
 				filepath.Base("/"+prefix+object.Key),
 				object.Size,
@@ -132,36 +175,9 @@ func (p *S3Importer) scanRecursive(prefix string, result chan *importer.ScanResu
 			)
 			result <- importer.NewScanRecord("/"+object.Key, "", fi, nil)
 		}
-	}
 
-	var currentName string
-	if prefix == "" {
-		currentName = "/"
-	} else {
-		currentName = filepath.Base(prefix)
-	}
-
-	fi := objects.NewFileInfo(
-		currentName,
-		0,
-		0700|os.ModeDir,
-		time.Now(),
-		0,
-		0,
-		0,
-		0,
-		0,
-	)
-	result <- importer.NewScanRecord(path.Clean("/"+prefix), "", fi, nil)
-}
-
-func (p *S3Importer) Scan() (<-chan *importer.ScanResult, error) {
-	c := make(chan *importer.ScanResult)
-	go func() {
-		defer close(c)
-		p.scanRecursive("", c)
 	}()
-	return c, nil
+	return result, nil
 }
 
 func (p *S3Importer) NewReader(pathname string) (io.ReadCloser, error) {
